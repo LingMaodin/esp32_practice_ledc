@@ -8,6 +8,8 @@
 #include "driver/gpio_filter.h"
 #include "driver/pulse_cnt.h"
 #include "driver/ledc.h"
+#include "button_gpio.h"
+#include "iot_button.h"
 
 #define TAG "main"
 #define PCNT_S1_NUM GPIO_NUM_1
@@ -18,6 +20,9 @@
 #define PWM_NUM GPIO_NUM_9
 #define AIN1_NUM GPIO_NUM_10
 #define AIN2_NUM GPIO_NUM_11
+#define FORWARD_NUM GPIO_NUM_12
+#define BACKWARD_NUM GPIO_NUM_13
+#define STOP_NUM GPIO_NUM_14
 #define ENCODER_PPR 13.0//每转脉冲数
 #define TARGET_RPM 300.0//目标转速
 #define GEAR_RATIO 20.049//减速比
@@ -31,6 +36,9 @@ static pcnt_channel_handle_t pcnt_channel_s2_hdl=NULL;//霍尔编码器通道2�
 static gpio_glitch_filter_handle_t pcnt_button_filter_hdl=NULL;//霍尔编码器毛刺过滤器句柄
 static esp_timer_handle_t esptimer_hdl=NULL;//esp定时器句柄
 static QueueHandle_t pulse_count_queue=NULL;//计数值队列句柄
+static button_handle_t forward_button_hdl=NULL;
+static button_handle_t backward_button_hdl=NULL;
+static button_handle_t stop_button_hdl=NULL;
 
 void gpio_init()//GPIO初始化
 {
@@ -40,6 +48,35 @@ void gpio_init()//GPIO初始化
     };
     ESP_ERROR_CHECK(gpio_config(&gpio_conf));//配置GPIO并判断是否成功
     return;
+}
+
+static void forward_button_cb(void *arg,void *usr_data)
+{
+    gpio_set_level(AIN1_NUM,1);
+    gpio_set_level(AIN2_NUM,0);
+}
+
+static void backward_button_cb(void *arg,void *usr_data)
+{
+    gpio_set_level(AIN1_NUM,0);
+    gpio_set_level(AIN2_NUM,1);
+}
+
+static void stop_button_cb(void *arg,void *usr_data)
+{
+    gpio_set_level(AIN1_NUM,0);
+    gpio_set_level(AIN2_NUM,0);
+}
+
+void button_init(int32_t gpio_num,button_handle_t ret_button,button_cb_t cb)
+{
+    button_config_t button_cfg={0};
+    button_gpio_config_t button_gpio_cfg={
+        .gpio_num=gpio_num,
+        .active_level=0,
+    };
+    iot_button_new_gpio_device(&button_cfg,&button_gpio_cfg,&ret_button);
+    iot_button_register_cb(ret_button,BUTTON_SINGLE_CLICK,NULL,cb,NULL);
 }
 
 void pcnt_init()//pcnt初始化
@@ -93,7 +130,7 @@ void esptimer_cb(void *arg)
     pcnt_unit_get_count(pcnt_unit_hdl,&pulse_count);
     pcnt_unit_clear_count(pcnt_unit_hdl);
     float speed_error=(float)TARGET_PULSES_PER_PERIOD-(float)pulse_count;
-    xQueueSend(pulse_count_queue,&speed_error,pdMS_TO_TICKS(10));
+    xQueueSend(pulse_count_queue,&speed_error,0);
 }
 
 void esptimer_init()
@@ -134,7 +171,7 @@ void motor_control_task(void *arg)
 {
     float speed_error=0,speed_error_integral=0;
     while(1) {
-        if(xQueueReceive(pulse_count_queue,&speed_error,portMAX_DELAY))
+        if(xQueueReceive(pulse_count_queue,&speed_error,portMAX_DELAY)==pdTRUE)
         {
             speed_error_integral+=speed_error;
             double duty=BASE_PWM_DUTY;
@@ -148,10 +185,15 @@ void motor_control_task(void *arg)
 
 void app_main(void)
 {
+    pulse_count_queue=xQueueCreate(5,sizeof(float));
     gpio_init();//GPIO初始化
+    button_init(FORWARD_NUM,forward_button_hdl,forward_button_cb);
+    button_init(BACKWARD_NUM,backward_button_hdl,backward_button_cb);
+    button_init(STOP_NUM,stop_button_hdl,stop_button_cb);
+    gpio_set_level(AIN1_NUM,0);
+    gpio_set_level(AIN2_NUM,0);
     pcnt_init();//pcnt初始化
     esptimer_init();//esptimer初始化
     ledc_init();//ledc初始化
-    pulse_count_queue=xQueueCreate(5,sizeof(float));
     xTaskCreate(motor_control_task,"motor_control_task",4096,NULL,5,NULL);
 }
